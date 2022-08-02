@@ -4,6 +4,7 @@ import struct
 
 DCCP_PACKAGE_TYPE_REQUEST = 0
 DCCP_PACKAGE_TYPE_RESPONSE = 1
+DCCP_PACKAGE_TYPE_ACK = 3
 
 
 class DCCP(dpkt.Packet):
@@ -19,14 +20,26 @@ class DCCP(dpkt.Packet):
     class DCCPRequestResponse(dpkt.Packet):
         __hdr__ = (("code", "B", 0),)
 
+    class DCCPData(dpkt.Packet):
+        pass
+
+    class DCCPAckDataAck(dpkt.Packet):
+        def __init__(self, *args, x, **kwargs):
+            self.x = x
+            self.ack = 0
+            super().__init__(*args, **kwargs)
+        def unpack(self, buf):
+            if self.x == 1:
+                # 2 byte header with the first 16 bits reserved and the remaining 48 bits being the ack number
+                (low, high) = struct.unpack("!IH", buf[2:])
+                self.ack = (low << 16) | high
+            else:
+                # TODO add case for handling 24 ack
+                pass
+
     __bit_fields__ = {
         "_ccval_cscov": (("ccval", 4), ("cscov", 4)),
         "_res_type_x": (("_res", 3), ("type", 4), ("x", 1)),
-    }
-
-    _package_types = {
-        DCCP_PACKAGE_TYPE_REQUEST: DCCPRequestResponse,
-        DCCP_PACKAGE_TYPE_RESPONSE: DCCPRequestResponse,
     }
 
     def unpack(self, buf):
@@ -40,10 +53,15 @@ class DCCP(dpkt.Packet):
             self.seq = (low << 16) | high
             self.__hdr_len__ += 6
         else:
-            self.seq = buf[self.__hdr_len__ : self.__hdr_len__ + 4]
-            self.__hdr_len__ += 3
+            # TODO add case for handling 24 bit seq nums
+            pass
+
         self.data = buf[self.__hdr_len__ + 1 :]
-        self.data = self._package_types[self.type](self.data)
+        if self.type == DCCP_PACKAGE_TYPE_REQUEST or self.type == DCCP_PACKAGE_TYPE_RESPONSE:
+            self.data = self.DCCPRequestResponse(self.data)
+        elif self.type == DCCP_PACKAGE_TYPE_ACK:
+            self.data = self.DCCPAckDataAck(self.data, x=self.x)
+
         setattr(self, self.data.__class__.__name__.lower(), self.data)
 
     def __len__(self):
@@ -69,3 +87,16 @@ def test_dccp_unpack_request():
     assert dccp.x == 1
     assert dccp.seq == 185948641247353
     assert dccp.data.code == 0
+
+
+def test_dccp_unpack_ack():
+    data = (
+        b"\x14\x51\x90\x39\x06\x00\x67\xf4\x07\x00\xcd\xe3\xea\xdf\x6d\xcf"
+        b"\x00\x00\xa9\x1e\x8a\xb5\x40\x7a"
+    )
+
+    dccp = DCCP(data)
+    assert dccp.sport == 5201
+    assert dccp.dport == 36921
+    assert dccp.type == 3
+    assert dccp.data.ack == 185948641247354
